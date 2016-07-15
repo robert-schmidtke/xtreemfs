@@ -237,7 +237,7 @@ public class NativeVolume implements Volume {
     @Override
     public void setXAttr(UserCredentials userCredentials, Auth auth, String path, String name, String value,
             XATTR_FLAGS flags) throws IOException, PosixErrorException, AddressToUUIDNotFoundException {
-        throw new RuntimeException("Not implemented in the C++ library.");
+        setXAttr(userCredentials, path, name, value, flags);
     }
 
     @Override
@@ -347,6 +347,12 @@ public class NativeVolume implements Volume {
         }
 
         return new ReplicationPolicyImplementation(updatePolicy, replicationFactor, replicationFlags);
+    }
+
+    @Override
+    public void setReplicaUpdatePolicy(UserCredentials userCredentials, String path, String policy)
+            throws IOException, PosixErrorException, AddressToUUIDNotFoundException {
+        proxy.setReplicaUpdatePolicy(userCredentials, path, policy);
     }
 
     @Override

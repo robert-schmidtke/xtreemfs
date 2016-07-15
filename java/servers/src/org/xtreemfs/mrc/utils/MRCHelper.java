@@ -33,6 +33,7 @@ import org.xtreemfs.foundation.pbrpc.generatedinterfaces.RPC.POSIXErrno;
 import org.xtreemfs.foundation.util.OutputUtils;
 import org.xtreemfs.mrc.MRCConfig;
 import org.xtreemfs.mrc.MRCException;
+import org.xtreemfs.mrc.MRCRequestDispatcher;
 import org.xtreemfs.mrc.UserException;
 import org.xtreemfs.mrc.ac.FileAccessManager;
 import org.xtreemfs.mrc.database.AtomicDBUpdate;
@@ -48,6 +49,7 @@ import org.xtreemfs.mrc.metadata.StripingPolicy;
 import org.xtreemfs.mrc.metadata.XAttr;
 import org.xtreemfs.mrc.metadata.XLoc;
 import org.xtreemfs.mrc.metadata.XLocList;
+import org.xtreemfs.mrc.operations.SetReplicaUpdatePolicyOperation;
 import org.xtreemfs.mrc.osdselection.OSDStatusManager;
 import org.xtreemfs.pbrpc.generatedinterfaces.DIR.Service;
 import org.xtreemfs.pbrpc.generatedinterfaces.DIR.ServiceDataMap;
@@ -268,6 +270,37 @@ public class MRCHelper {
                     width);
 
         return sMan.createXLoc(stripingPolicy, osds, replFlags);
+    }
+
+    /**
+     * Restores the strategy flag if it is not set yet. <br>
+     * If the defaultReplicationPolicy is present and contains strategy
+     * flags, they are used. Otherwise the general defaults are used.
+     * 
+     * @param defaultReplicationPolicy
+     *            Maybe null
+     */
+    public static int restoreStrategyFlag(int replFlags, ReplicationPolicy defaultReplicationPolicy) {
+        // Restore the strategy only if none is set yet.
+        if (ReplicationFlags.containsStrategy(replFlags)) {
+            return replFlags;
+        }
+
+        if (defaultReplicationPolicy != null
+                && ReplicationFlags.containsStrategy(defaultReplicationPolicy.getFlags())) {
+            // Use the default strategy if it is set
+            replFlags = replFlags | ReplicationFlags.getStrategy(defaultReplicationPolicy.getFlags());
+
+        } else if (ReplicationFlags.isPartialReplica(replFlags)) {
+            // Assumption: partial replica -> sequential prefetching
+            replFlags = ReplicationFlags.setSequentialPrefetchingStrategy(replFlags);
+
+        } else {
+            // Assumption: full replica -> rarest first strategy
+            replFlags = ReplicationFlags.setRarestFirstStrategy(replFlags);
+        }
+
+        return replFlags;
     }
 
     /**
@@ -614,9 +647,12 @@ public class MRCHelper {
         return "";
     }
 
-    public static void setSysAttrValue(StorageManager sMan, VolumeManager vMan, FileAccessManager faMan, long parentId,
-            FileMetadata file, String keyString, String value, AtomicDBUpdate update) throws UserException,
-            DatabaseException {
+    public static void setSysAttrValue(MRCRequestDispatcher master, StorageManager sMan, long parentId,
+            FileMetadata file, String keyString, String value, AtomicDBUpdate update)
+                    throws UserException, DatabaseException {
+
+        final VolumeManager vMan = master.getVolumeManager();
+        final FileAccessManager faMan = master.getFileAccessManager();
 
         // handle policy-specific values
         if (keyString.startsWith(POLICY_ATTR_PREFIX.toString() + ".")) {
@@ -662,8 +698,7 @@ public class MRCHelper {
                 ReplicationPolicy replPolicy = sMan.getDefaultReplicationPolicy(file.getId());
                 if (sp != null
                         && sp.getWidth() > 1
-                        && replPolicy != null && (replPolicy.getName().equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE) || replPolicy
-                                .getName().equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ))) {
+                        && replPolicy != null && ReplicaUpdatePolicies.isRW(replPolicy.getName())) {
                     throw new UserException(POSIXErrno.POSIX_ERROR_EINVAL,
                             "Striping of rw-replicated Files is not supported yet.");
                 }
@@ -714,40 +749,17 @@ public class MRCHelper {
 
             break;
 
+        // Kept for backwards compatibility with xtfsutil.
         case read_only:
-
-            // TODO: unify w/ 'set_repl_update_policy'
-
-            if (file.isDirectory())
-                throw new UserException(POSIXErrno.POSIX_ERROR_EPERM, "only files can be made read-only");
-
             boolean readOnly = Boolean.valueOf(value);
+            String newReplicaUpdatePolicy = readOnly ? ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY
+                    : ReplicaUpdatePolicies.REPL_UPDATE_PC_NONE;
+            SetReplicaUpdatePolicyOperation.setReplicaUpdatePolicy(master, sMan, update, file, newReplicaUpdatePolicy);
+            break;
 
-            if (!readOnly && file.getXLocList() != null && file.getXLocList().getReplicaCount() > 1)
-                throw new UserException(POSIXErrno.POSIX_ERROR_EPERM,
-                        "read-only flag cannot be removed from files with multiple replicas");
-
-            // set the update policy string in the X-Locations list to 'read
-            // only replication' and mark the first replica as 'full'
-            if (file.getXLocList() != null) {
-                XLocList xLoc = file.getXLocList();
-                XLoc[] replicas = new XLoc[xLoc.getReplicaCount()];
-                for (int i = 0; i < replicas.length; i++)
-                    replicas[i] = xLoc.getReplica(i);
-
-                replicas[0].setReplicationFlags(ReplicationFlags.setFullReplica(ReplicationFlags
-                        .setReplicaIsComplete(replicas[0].getReplicationFlags())));
-
-                XLocList newXLoc = sMan.createXLocList(replicas, readOnly ? ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY
-                        : ReplicaUpdatePolicies.REPL_UPDATE_PC_NONE, xLoc.getVersion() + 1);
-                file.setXLocList(newXLoc);
-                sMan.setMetadata(file, FileMetadata.RC_METADATA, update);
-            }
-
-            // set the read-only flag
-            file.setReadOnly(readOnly);
-            sMan.setMetadata(file, FileMetadata.RC_METADATA, update);
-
+        // Kept for backwards compatibility with xtfsutil.
+        case set_repl_update_policy:
+            SetReplicaUpdatePolicyOperation.setReplicaUpdatePolicy(master, sMan, update, file, value);
             break;
 
         case snapshots:
@@ -855,93 +867,6 @@ public class MRCHelper {
 
             break;
 
-        case set_repl_update_policy:
-
-            if (file.isDirectory())
-                throw new UserException(POSIXErrno.POSIX_ERROR_EISDIR, "file required");
-
-            xlocs = file.getXLocList();
-            xlocArray = new XLoc[xlocs.getReplicaCount()];
-            it = xlocs.iterator();
-            for (int i = 0; it.hasNext(); i++)
-                xlocArray[i] = it.next();
-
-            String replUpdatePolicy = xlocs.getReplUpdatePolicy();
-
-            // Check allowed policies.
-            if (!ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ.equals(value)
-                    && !ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE.equals(value)
-                    && !ReplicaUpdatePolicies.REPL_UPDATE_PC_NONE.equals(value)
-                    && !ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY.equals(value))
-                throw new UserException(POSIXErrno.POSIX_ERROR_EINVAL, "Invalid replica update policy: " + value);
-
-            // WaRa was renamed to WaR1.
-            if (ReplicaUpdatePolicies.REPL_UPDATE_PC_WARA.equals(value)) {
-                throw new UserException(
-                    POSIXErrno.POSIX_ERROR_EINVAL,
-                    "Do no longer use the policy WaRa. Instead you're probably looking for the WaR1 policy (write all replicas, read from one)."
-                        + value);
-            }
-
-            if (ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY.equals(replUpdatePolicy) && xlocArray.length > 1)
-                throw new UserException(POSIXErrno.POSIX_ERROR_EINVAL,
-                    "changing replica update policies of read-only-replicated files is not allowed");
-
-            if (ReplicaUpdatePolicies.REPL_UPDATE_PC_NONE.equals(value)) {
-                // if there are more than one replica, report an error
-                if (xlocs.getReplicaCount() > 1)
-                    throw new UserException(POSIXErrno.POSIX_ERROR_EINVAL,
-                        "number of replicas has to be reduced to 1 before replica update policy can be set to "
-                            + ReplicaUpdatePolicies.REPL_UPDATE_PC_NONE + " (current replica count = "
-                            + xlocs.getReplicaCount() + ")");
-            }
-
-            // Do not allow to switch between read-only and read/write replication
-            // as there are currently no mechanisms in place to guarantee that the replicas are synchronized.
-            if ((ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY.equals(replUpdatePolicy)
-                    && (ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ.equals(value)
-                            || ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE.equals(value)))
-                ||
-                (ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY.equals(value)
-                        && (ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ.equals(replUpdatePolicy)
-                                || ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE.equals(replUpdatePolicy)))) {
-                throw new UserException(
-                    POSIXErrno.POSIX_ERROR_EINVAL,
-                    "Currently, it is not possible to change from a read-only to a read/write replication policy or vise versa.");
-            }
-
-            // Update replication policy in new xloc list.
-            newXLocList = sMan.createXLocList(xlocArray, value, xlocs.getVersion() + 1);
-
-            // mark the first replica in the list as 'complete' (only relevant
-            // for read-only replication)
-            if (ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY.equals(value)) {
-                newXLocList.getReplica(0).setReplicationFlags(
-                        ReplicationFlags.setFullReplica(ReplicationFlags.setReplicaIsComplete(newXLocList.getReplica(0)
-                                .getReplicationFlags())));
-                file.setReadOnly(true);
-            }
-
-            // check if striping + rw replication would be set
-            StripingPolicy stripingPolicy = file.getXLocList().getReplica(0).getStripingPolicy();
-            if (stripingPolicy.getWidth() > 1
-                    && (value.equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE) || value
-                            .equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ))) {
-                throw new UserException(POSIXErrno.POSIX_ERROR_EINVAL, "RW-replication of striped files is not supported yet.");
-            }
-
-            // Remove read only state of file if readonly policy gets reverted.
-            if (ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY.equals(replUpdatePolicy)
-                    && ReplicaUpdatePolicies.REPL_UPDATE_PC_NONE.equals(value)) {
-                file.setReadOnly(false);
-            }
-
-            // Write back updated file data.
-            file.setXLocList(newXLocList);
-            sMan.setMetadata(file, FileMetadata.RC_METADATA, update);
-
-            break;
-
         case default_rp:
 
             if (!file.isDirectory())
@@ -950,8 +875,7 @@ public class MRCHelper {
 
             try {
 
-                ReplicationPolicy rp = null;
-                rp = Converter.jsonStringToReplicationPolicy(value);
+                ReplicationPolicy rp = Converter.jsonStringToReplicationPolicy(value);
 
                 if (rp.getFactor() == 1 && !ReplicaUpdatePolicies.REPL_UPDATE_PC_NONE.equals(rp.getName())) {
                     throw new UserException(POSIXErrno.POSIX_ERROR_EPERM,
@@ -960,8 +884,7 @@ public class MRCHelper {
 
                 // check if rw replication + striping would be set
                 if (sMan.getDefaultStripingPolicy(file.getId()).getWidth() > 1
-                        && (rp.getName().equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE) || rp.getName().equals(
-                                ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ))) {
+                        && ReplicaUpdatePolicies.isRW(rp.getName())) {
                     throw new UserException(POSIXErrno.POSIX_ERROR_EINVAL,
                             "RW-replication of striped files is not supported yet.");
                 }

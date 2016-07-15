@@ -221,7 +221,6 @@ public final class NativeHelper {
 
     public static ClientProxy createClientProxy(String[] dirServiceAddressesArray, UserCredentials userCredentials,
             SSLOptions sslOptions, Options options) {
-        // TODO (jdillmann): Think about moving this to the factory.
         StringVector dirServiceAddressesVector = StringVector.from(Arrays.asList(dirServiceAddressesArray));
         ServiceAddresses dirServiceAddresses = new ServiceAddresses(dirServiceAddressesVector);
         OptionsProxy optionsProxy = NativeHelper.migrateOptions(options);
@@ -237,7 +236,9 @@ public final class NativeHelper {
         op.setMetadata_cache_size(BigInteger.valueOf(o.getMetadataCacheSize()));
         op.setMax_tries(o.getMaxTries());
         op.setMax_read_tries(o.getMaxReadTries());
+        op.setMax_write_tries(o.getMaxWriteTries());
         op.setMax_view_renewals(o.getMaxViewRenewals());
+        op.setRetry_delay_s(o.getRetryDelay_s());
         op.setAsync_writes_max_request_size_kb(o.getMaxWriteahead());
         op.setEnable_async_writes(o.isEnableAsyncWrites());
         op.setPeriodic_file_size_updates_interval_s(o.getPeriodicFileSizeUpdatesIntervalS());
@@ -251,7 +252,6 @@ public final class NativeHelper {
         op.setMetadata_cache_ttl_s(BigInteger.valueOf(o.getMetadataCacheTTLs()));
         op.setPeriodic_xcap_renewal_interval_s(o.getPeriodicXcapRenewalIntervalS());
         op.setRequest_timeout_s(o.getRequestTimeout_s());
-        op.setRetry_delay_s(o.getRetryDelay_s());
         op.setXLoc_install_poll_interval_s(o.getXLocInstallPollIntervalS());
 
         return op;
@@ -270,8 +270,8 @@ public final class NativeHelper {
         String ssl_pem_trusted_certs_path = "";
 
         // Get the Path to the required server certificates
-        String ssl_pkcs12_path = o.getServerCredentialFilePath();
-        String ssl_pkcs12_pass = o.getServerCredentialFilePassphrase();
+        String ssl_pkcs12_path = o.getServerCredentialFilePath() != null ? o.getServerCredentialFilePath() : "";
+        String ssl_pkcs12_pass = o.getServerCredentialFilePassphrase() != null ? o.getServerCredentialFilePassphrase() : "";
 
         // PKCS#12 certificates are converted to pem in the C++ client.
         SSLContext.file_format format = SSLContext.file_format.pem;
@@ -280,7 +280,7 @@ public final class NativeHelper {
         boolean use_grid_ssl = o.isFakeSSLMode();
 
         // Get the SSL protocol string that has been used for initialization
-        String ssl_method_string = o.getSSLProtocolString();
+        String ssl_method_string = o.getSSLProtocolString() != null ? o.getSSLProtocolString() : "";
 
         // Verifying certificates is not enabled in Java
         // TODO: Ask Robert if this is true

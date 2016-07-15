@@ -14,7 +14,7 @@ import org.xtreemfs.foundation.pbrpc.generatedinterfaces.RPC.UserCredentials;
 
 /**
  * Returns different kinds of Client implementations.
- * 
+ *
  */
 public class ClientFactory {
 
@@ -28,12 +28,15 @@ public class ClientFactory {
 
     /**
      * Specifies the default ClientType that is used if the parameter is omitted.
+     * 
+     * TODO: Switch to native client due to new features only implemented in the C++ client. To do this, many test junit
+     * testcases have to be changed.
      */
-    final static ClientType defaultType = ClientType.JAVA;
+    final static ClientType defaultType = ClientType.NATIVE;
 
     /**
      * Returns an instance of a default client of the specified type with one DIR Address.
-     * 
+     *
      * @param type
      *            Type of the client instance.
      * @param dirServiceAddress
@@ -53,7 +56,7 @@ public class ClientFactory {
 
     /**
      * Returns an instance of a default client of the specified type with multiple DIR Address.
-     * 
+     *
      * @param type
      *            Type of the client instance.
      * @param dirServiceAddress
@@ -78,7 +81,7 @@ public class ClientFactory {
 
     /**
      * Returns an instance of an admin client of the specified type with one DIR Address.
-     * 
+     *
      * @param type
      *            Type of the client instance.
      * @param dirServiceAddress
@@ -98,7 +101,7 @@ public class ClientFactory {
 
     /**
      * Returns an instance of a default client of the specified type with multiple DIR Address.
-     * 
+     *
      * @param type
      *            Type of the client instance.
      * @param dirServiceAddresses
@@ -123,7 +126,7 @@ public class ClientFactory {
 
     /**
      * Returns an instance of a default client with one DIR Address.
-     * 
+     *
      * @param dirServiceAddress
      *            Address of the DIR service (Format: ip-addr:port, e.g. localhost:32638)
      * @param userCredentials
@@ -142,7 +145,7 @@ public class ClientFactory {
 
     /**
      * Returns an instance of a default client with multiple DIR Addresses.
-     * 
+     *
      * @param dirServiceAddresses
      *            Addresses of the DIR services (Format: ip-addr:port, e.g. localhost:32638)
      * @param userCredentials
@@ -159,7 +162,7 @@ public class ClientFactory {
 
     /**
      * Returns an instance of an admin client with one DIR address.
-     * 
+     *
      * @param dirServiceAddress
      *            Address of the DIR service (Format: ip-addr:port, e.g. localhost:32638)
      * @param userCredentials
@@ -178,7 +181,7 @@ public class ClientFactory {
 
     /**
      * Returns an instance of a admin client with multiple DIR Addresses.
-     * 
+     *
      * @param dirServiceAddresses
      *            Addresses of the DIR services (Format: ip-addr:port, e.g. localhost:32638)
      * @param userCredentials
@@ -187,7 +190,7 @@ public class ClientFactory {
      *            NULL if no SSL is used.
      * @param options
      *            Has to contain loglevel string and logfile path.
-     * 
+     *
      */
     public static AdminClient createAdminClient(String[] dirServiceAddresses, UserCredentials userCredentials,
             SSLOptions sslOptions, Options options) {

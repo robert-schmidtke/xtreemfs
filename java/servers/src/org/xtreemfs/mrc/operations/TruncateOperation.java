@@ -23,6 +23,7 @@ import org.xtreemfs.mrc.database.DatabaseException;
 import org.xtreemfs.mrc.database.DatabaseException.ExceptionType;
 import org.xtreemfs.mrc.database.StorageManager;
 import org.xtreemfs.mrc.metadata.FileMetadata;
+import org.xtreemfs.mrc.quota.QuotaFileInformation;
 import org.xtreemfs.mrc.utils.MRCHelper.GlobalFileIdResolver;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.SnapConfig;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.XCap;
@@ -79,7 +80,13 @@ public class TruncateOperation extends MRCOperation {
         int newEpoch = file.getIssuedEpoch() + 1;
         file.setIssuedEpoch(newEpoch);
         sMan.setMetadata(file, FileMetadata.RC_METADATA, update);
-        
+
+        // save new expire time at voucher manager
+        long newExpireMs = TimeSync.getGlobalTime() + master.getConfig().getCapabilityTimeout() * 1000;
+        QuotaFileInformation quotaFileInformation = new QuotaFileInformation(idRes.getVolumeId(), file);
+        long voucherSize = master.getMrcVoucherManager().addRenewedTimestamp(quotaFileInformation,
+                writeCap.getClientIdentity(), writeCap.getExpireMs(), newExpireMs, update);
+
         // create a truncate capability from the previous write capability
         Capability truncCap = new Capability(writeCap.getFileId(),
                 writeCap.getAccessMode() | FileAccessManager.O_TRUNC, master.getConfig().getCapabilityTimeout(),
@@ -88,11 +95,10 @@ public class TruncateOperation extends MRCOperation {
                 writeCap.isReplicateOnClose(),
                 !sMan.getVolumeInfo().isSnapshotsEnabled() ? SnapConfig.SNAP_CONFIG_SNAPS_DISABLED : sMan
                         .getVolumeInfo().isSnapVolume() ? SnapConfig.SNAP_CONFIG_ACCESS_SNAP
-                        : SnapConfig.SNAP_CONFIG_ACCESS_CURRENT, sMan.getVolumeInfo().getCreationTime(),
-                        writeCap.getTraceConfig().getTraceRequests(), writeCap.getTraceConfig().getTracingPolicyConfig(),
-                        writeCap.getTraceConfig().getTracingPolicy(), writeCap.getVoucherSize(),
-                        TimeSync.getGlobalTime() + master.getConfig().getCapabilityTimeout() * 1000,
-                        master.getConfig().getCapabilitySecret());
+                        : SnapConfig.SNAP_CONFIG_ACCESS_CURRENT, sMan.getVolumeInfo().getCreationTime(), writeCap
+                        .getTraceConfig().getTraceRequests(), writeCap.getTraceConfig().getTracingPolicyConfig(),
+                        writeCap.getTraceConfig().getTracingPolicy(), voucherSize, newExpireMs, master.getConfig()
+                        .getCapabilitySecret());
 
         // set the response
         rq.setResponse(truncCap.getXCap());

@@ -351,6 +351,7 @@ public class RWReplicationStage extends Stage implements FleaseMessageSenderInte
                 // Ignore any leaseStateChange if the replica is invalidated.
                 if (state.isInvalidated()) {
                     doInvalidated(state);
+                    return;
                 }
 
                 boolean leaseOk = false;
@@ -520,20 +521,24 @@ public class RWReplicationStage extends Stage implements FleaseMessageSenderInte
                 continue;
             }
 
+            // Remove an object from the queue and process it
             if (!file.getObjectsToFetch().isEmpty()) {
                 ObjectVersionMapping o = file.getObjectsToFetch().remove(0);
                 file.incrementNumObjectsPending();
                 numObjsInFlight++;
                 fetchObject(file, o);
-            } else {
-                // reset complete!
-                Logging.logMessage(Logging.LEVEL_DEBUG, Category.replication, this,
-                        "(R:%s) RESET complete for file %s", localID, file.getFileId());
-                doResetComplete(file);
             }
 
+            // If there are still missing objects, return the file to the reset queue
             if (!file.getObjectsToFetch().isEmpty()) {
                 filesInReset.add(file);
+            }
+                
+            // If every missing object is fetches and no object is pending processing, the reset is complete
+            if (file.getObjectsToFetch().isEmpty() && file.getNumObjectsPending() == 0) {
+                Logging.logMessage(Logging.LEVEL_DEBUG, Category.replication, this, "(R:%s) RESET complete for file %s",
+                        localID, file.getFileId());
+                doResetComplete(file);
             }
         }
     }
@@ -1002,7 +1007,7 @@ public class RWReplicationStage extends Stage implements FleaseMessageSenderInte
         // Files are closed due to a timer in the openFileTable or if they are unlinked.
         // Since the openFileTable is pinged on most operations and an unlinked file is no longer available the fileState
         // can be closed.
-        // TODO (jdillmann): Correct errno would be probably EBADF (9)
+        // TODO: Correct errno would be probably EBADF (9)
         ErrorResponse error = ErrorUtils.getErrorResponse(ErrorType.IO_ERROR, POSIXErrno.POSIX_ERROR_EIO,
                 "file has been closed");
         closeFileState(fileId, false, error);
@@ -1196,26 +1201,7 @@ public class RWReplicationStage extends Stage implements FleaseMessageSenderInte
                 switch (state.getState()) {
                 case WAITING_FOR_LEASE:
                 case INITIALIZING:
-                case RESET: {
-                    if (Logging.isDebug()) {
-                        Logging.logMessage(Logging.LEVEL_DEBUG, Category.replication, this,
-                                "enqeue update for %s (state is %s)", fileId, state.getState());
-                    }
-                    if (state.sizeOfPendingRequests() > MAX_PENDING_PER_FILE) {
-                        if (Logging.isDebug()) {
-                            Logging.logMessage(Logging.LEVEL_DEBUG, this,
-                                    "rejecting request: too many requests (is: %d, max %d) in queue for file %s",
-                                    state.sizeOfPendingRequests(), MAX_PENDING_PER_FILE, fileId);
-                        }
-                        callback.failed(ErrorUtils.getErrorResponse(ErrorType.INTERNAL_SERVER_ERROR,
-                                POSIXErrno.POSIX_ERROR_NONE, "too many requests in queue for file"));
-                        return;
-                    } else {
-                        state.addPendingRequest(method);
-                    }
-                    return;
-                }
-
+                case RESET:
                 case OPEN: {
                     if (Logging.isDebug()) {
                         Logging.logMessage(Logging.LEVEL_DEBUG, Category.replication, this,
@@ -1234,9 +1220,10 @@ public class RWReplicationStage extends Stage implements FleaseMessageSenderInte
                         state.addPendingRequest(method);
                     }
 
-                    // immediately change to backup mode...no need to check the lease
-                    doWaitingForLease(state);
-
+                    if (state.getState() == ReplicaState.OPEN) {
+                        // immediately change to backup mode...no need to check the lease
+                        doWaitingForLease(state);
+                    }
                     return;
                 }
                 }
@@ -1308,8 +1295,7 @@ public class RWReplicationStage extends Stage implements FleaseMessageSenderInte
                     final ErrorResponse err = ErrorUtils.getInternalServerError(ex);
                     failed(state, err, "processPrepareOp");
                     if (state.getState() == ReplicaState.BACKUP || state.getState() == ReplicaState.PRIMARY) {
-                        // Request is not in queue, we must notify
-                        // callback.
+                        // Request is not in queue, we must notify callback.
                         callback.failed(err);
                     }
                 }
@@ -1551,7 +1537,7 @@ public class RWReplicationStage extends Stage implements FleaseMessageSenderInte
             case INVALIDATED:
                 // At this point it is ensured, that no other Request is queued. Therefore the AuthState can be set
                 // regardless of the state.
-                // TODO(jdillmann): It would be possible to store and compare maxObjNo and truncateEpoch to identify a AuthState.
+                // TODO (Improvement): It would be possible to store and compare maxObjNo and truncateEpoch to identify a AuthState.
                 if (!state.isInvalidatedReset()) {
                     // Execute the RESET
                     state.setInvalidatedReset(true);

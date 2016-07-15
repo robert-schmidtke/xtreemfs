@@ -48,6 +48,7 @@ import org.xtreemfs.mrc.operations.MRCOperation;
 import org.xtreemfs.mrc.utils.Converter;
 import org.xtreemfs.mrc.utils.MRCHelper.GlobalFileIdResolver;
 import org.xtreemfs.osd.rwre.CoordinatedReplicaUpdatePolicy;
+import org.xtreemfs.osd.rwre.ReplicaUpdatePolicy;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.FileCredentials;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.LeaseState;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.Replica;
@@ -277,20 +278,28 @@ public class XLocSetCoordinator extends LifeCycleThread implements DBAccessResul
         // Ensure the next view won't be propagated until it is installed at the MRC.
         final XLocSet newXLocSet = Converter.xLocListToXLocSet(newXLocList).setVersion(curXLocSet.getVersion()).build();
 
-        // TODO(jdillmann): Use centralized method to check if a lease is required.
-        if (curXLocSet.getReplicaUpdatePolicy().equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ)
-                || curXLocSet.getReplicaUpdatePolicy().equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE)
-                || curXLocSet.getReplicaUpdatePolicy().equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WARA)) {
+        final String replicaUpdatePolicy = curXLocSet.getReplicaUpdatePolicy();
 
+        if (replicaUpdatePolicy.equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WQRQ)) {
             // Invalidate the majority of the replicas, get their ReplicaStatus and calculate the AuthState.
-            int numRequiredAcks = calculateNumRequiredAcks(fileId, curXLocSet);
-            ReplicaStatus[] states = invalidateReplicas(fileId, cap, curXLocSet, numRequiredAcks);
+            int numAcksMajority = (int) Math.ceil(((double) curXLocSet.getReplicasCount() + 1.0) / 2.0);
+            ReplicaStatus[] states = invalidateReplicas(fileId, cap, curXLocSet, numAcksMajority);
             AuthoritativeReplicaState authState = calculateAuthoritativeState(fileId, curXLocSet, states);
 
             // Update the required number of replicas while they are invalidated.
             updateReplicas(fileId, cap, newXLocSet, curXLocSet, authState);
 
-        } else if (curXLocSet.getReplicaUpdatePolicy().equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY)) {
+        } else if (replicaUpdatePolicy.equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WARONE)
+                || replicaUpdatePolicy.equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_WARA)) {
+            // Invalidate all of the replicas.
+            int numAcksMajority = curXLocSet.getReplicasCount();
+            ReplicaStatus[] states = invalidateReplicas(fileId, cap, curXLocSet, numAcksMajority);
+            AuthoritativeReplicaState authState = calculateAuthoritativeState(fileId, curXLocSet, states);
+
+            // Update the required number of replicas while they are invalidated.
+            updateReplicas(fileId, cap, newXLocSet, curXLocSet, authState);
+
+        } else if (replicaUpdatePolicy.equals(ReplicaUpdatePolicies.REPL_UPDATE_PC_RONLY)) {
             // In case of the read-only replication the replicas will be invalidated. But the coordination takes place
             // at the client by libxtreemfs.
             // The INVALIDATION request will be send to every replica, but the coordination continues on the first
@@ -591,8 +600,8 @@ public class XLocSetCoordinator extends LifeCycleThread implements DBAccessResul
 
         // If a primary exists, wait until the lease has timed out.
         // This is required, since the lease can't be actively returned.
-        // TODO (jdillmann): If the primary did response we could continue to update phase (but still would have to wait
-        // until leaseTO before finally installing the new xLoc)
+        // TODO (Improvement): If the primary did response we could continue to update phase (but still would have to
+        // wait until leaseTO before finally installing the new xLoc)
         synchronized (listener) {
             if (listener.primaryExists) {
                 long now = System.currentTimeMillis();
@@ -911,25 +920,35 @@ public class XLocSetCoordinator extends LifeCycleThread implements DBAccessResul
     }
 
     /**
-     * Calculate the number of required ACKS that are constituting a majority.
+     * Calculate the number of required ACKS for the files replication policy.
      * 
      * @param fileId
      * @param xLocSet
      * @return
      */
     private int calculateNumRequiredAcks(String fileId, XLocSet xLocSet) {
-        /*
-         * Essentially it is required to get ACKs from a majority for WqRq replicated files, 
-         * but for WaR1 it is required to 
-         *  - wait until every OSD is up to date in case of the addition of a replica
-         *  - and to wait for the invalidation/installation of the view on the removed OSD and one other.
-         *  
-         * But at the moment every read/write policy is depending on a majority due to the lease mechanism, 
-         * which results in an issue as seen at https://github.com/xtreemfs/xtreemfs/issues/235 but allows 
-         * for simpler handling of ACKs for view coordination.
-         */
+        // Generate a list of ServiceUUIDs from the XLocSet.
+        int i;
+        List<ServiceUUID> OSDUUIDs = new ArrayList<ServiceUUID>(xLocSet.getReplicasCount() - 1);
+        for (i = 0; i < xLocSet.getReplicasCount() - 1; i++) {
+            // Add each head OSDUUID to the list.
+            OSDUUIDs.add(i, new ServiceUUID(Helper.getOSDUUIDFromXlocSet(xLocSet, i, 0)));
+        }
+        // Save the last OSD as the localUUID.
+        String localUUID = Helper.getOSDUUIDFromXlocSet(xLocSet, i, 0);
 
-        int numRequiredAcks = xLocSet.getReplicasCount() / 2 + 1;
+        // Create the policy and ensure it is a CoordinatedReplicaUpdatePolicy
+        String replicaUpdatePolicy = xLocSet.getReplicaUpdatePolicy();
+        ReplicaUpdatePolicy policy = ReplicaUpdatePolicy.newReplicaUpdatePolicy(replicaUpdatePolicy, OSDUUIDs,
+                localUUID, fileId, null);
+
+        if (!(policy instanceof CoordinatedReplicaUpdatePolicy)) {
+            throw new IllegalArgumentException("CoordinatedReplicaUpdatePolicy instance expected.");
+        }
+
+        // Since the policy assumes that the localUUID's state is known, we have to wait for one more ACK on operations
+        // that aren't executed from an OSD.
+        int numRequiredAcks = ((CoordinatedReplicaUpdatePolicy) policy).getNumRequiredAcks(null) + 1;
         return numRequiredAcks;
     }
 

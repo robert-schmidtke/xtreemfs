@@ -14,6 +14,7 @@ import static org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.SYSTEM_V_FCNTL.
 import static org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.SYSTEM_V_FCNTL.SYSTEM_V_FCNTL_H_O_RDWR;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -27,12 +28,14 @@ import org.xtreemfs.common.libxtreemfs.AdminClient;
 import org.xtreemfs.common.libxtreemfs.AdminFileHandle;
 import org.xtreemfs.common.libxtreemfs.AdminVolume;
 import org.xtreemfs.common.libxtreemfs.ClientFactory;
+import org.xtreemfs.common.libxtreemfs.ClientFactory.ClientType;
 import org.xtreemfs.common.libxtreemfs.Helper;
 import org.xtreemfs.common.libxtreemfs.Options;
 import org.xtreemfs.common.libxtreemfs.Volume;
 import org.xtreemfs.common.libxtreemfs.exceptions.AddressToUUIDNotFoundException;
 import org.xtreemfs.common.libxtreemfs.exceptions.InvalidViewException;
 import org.xtreemfs.common.xloc.ReplicationFlags;
+import org.xtreemfs.foundation.buffer.BufferPool;
 import org.xtreemfs.foundation.buffer.ReusableBuffer;
 import org.xtreemfs.foundation.logging.Logging;
 import org.xtreemfs.foundation.pbrpc.client.RPCAuthentication;
@@ -44,6 +47,8 @@ import org.xtreemfs.mrc.metadata.ReplicationPolicy;
 import org.xtreemfs.osd.OSD;
 import org.xtreemfs.osd.OSDConfig;
 import org.xtreemfs.osd.OSDRequestDispatcher;
+import org.xtreemfs.osd.storage.HashStorageLayout;
+import org.xtreemfs.osd.storage.MetadataCache;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.OSDSelectionPolicyType;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.Replica;
 import org.xtreemfs.pbrpc.generatedinterfaces.GlobalTypes.StripingPolicy;
@@ -117,7 +122,7 @@ public class XLocSetCoordinatorTest {
 
         options.setMaxTries(2);
 
-        client = ClientFactory.createAdminClient(dirAddress, userCredentials, null, options);
+        client = ClientFactory.createAdminClient(ClientType.JAVA, dirAddress, userCredentials, null, options);
         client.start();
 
         LEASE_TIMEOUT_MS = configs[0].getFleaseLeaseToMS();
@@ -155,13 +160,6 @@ public class XLocSetCoordinatorTest {
         removeReadOutdated(volumeName, "/testfile-with-renewal", true);
         removeReadOutdated(volumeName, "/testfile-wo-renewal", false);
     }
-
-
-    /**
-     * Test to ensure the appropriate error (invalid view) is returned, when the WqRq policy is active and a client
-     * tries to read, and thus form an majority, based on an outdated XLocSet. TODO(jdillmann): Should test if flease
-     * transmits the views, when the removed replica does miss the .version_state file
-     */
 
     /**
      * Remove the primary replica and provoke an invalid view error by accessing the file with an outdated xLocSet.
@@ -248,13 +246,6 @@ public class XLocSetCoordinatorTest {
         addReadOutdated(volumeName, "/testfile-with-renewal", true);
         addReadOutdated(volumeName, "/testfile-wo-renewal", false);
     }
-
-
-    /**
-     * Test to ensure the appropriate error (invalid view) is returned, when new replicas are added to a file with the
-     * WqRw policy and a client tries to get access with an outdated xLocSet. TODO(jdillmann): Should test if flease
-     * transmits the views, when the removed replica does miss the .version_state file
-     */
 
     /**
      * Add additional replicas and and provoke an invalid view error by accessing the file with an outdated xLocSet.
@@ -479,6 +470,53 @@ public class XLocSetCoordinatorTest {
         volume.close();
 
         resetSuspendableOSDs(suspOSDs, 0);
+    }
+
+    /**
+     * This test ensures progress in case of corrupted version state files.
+     */
+    @Test
+    public void testCorruptVersionStateFile() throws Exception {
+        String volumeName = "testCorruptVersionStateFile";
+        String fileName = "/testfile";
+
+        // Create and open the volume and set a replication factor of 4.
+        client.createVolume(mrcAddress, auth, userCredentials, volumeName);
+        AdminVolume volume = client.openVolume(volumeName, null, options);
+
+        // Ensure the selected OSDs are sorted ascending.
+        volume.setOSDSelectionPolicy(userCredentials,
+                Helper.policiesToString(
+                        new OSDSelectionPolicyType[] { OSDSelectionPolicyType.OSD_SELECTION_POLICY_FILTER_DEFAULT,
+                                OSDSelectionPolicyType.OSD_SELECTION_POLICY_SORT_UUID }));
+
+        // Create the file an write some data to it.
+        AdminFileHandle file = volume.openFile(userCredentials, fileName,
+                Helper.flagsToInt(SYSTEM_V_FCNTL_H_O_RDWR, SYSTEM_V_FCNTL_H_O_CREAT), 0777);
+        ReusableBuffer dataIn = SetupUtils.generateData(256 * 1024, (byte) 1);
+        file.write(userCredentials, dataIn.getData(), 256 * 1024, 0);
+        dataIn.clear();
+
+        String fileId = file.getGlobalFileId();
+        file.close();
+
+        // Truncate the version state.
+        HashStorageLayout hsl = new HashStorageLayout(configs[0], new MetadataCache());
+        String filePath = hsl.generateAbsoluteFilePath(fileId) + "/" + HashStorageLayout.XLOC_VERSION_STATE_FILENAME;
+        RandomAccessFile raf = new RandomAccessFile(filePath, "rws");
+        raf.setLength(0);
+        raf.close();
+
+        // Restart the OSD (to clear the MetadataCache)
+        osds[0].shutdown();
+        osds[0] = new OSD(configs[0]);
+
+        file = volume.openFile(userCredentials, fileName, Helper.flagsToInt(SYSTEM_V_FCNTL_H_O_RDONLY));
+        file.read(userCredentials, dataIn.getData(), 1, 0);
+
+        file.close();
+        volume.close();
+        BufferPool.free(dataIn);
     }
 
     private void addReplicas(Volume volume, String fileName, int replicaNumber) throws IOException,
