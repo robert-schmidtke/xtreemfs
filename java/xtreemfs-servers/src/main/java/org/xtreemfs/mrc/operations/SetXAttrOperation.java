@@ -98,7 +98,12 @@ public class SetXAttrOperation extends MRCOperation {
             if (!exists && rqArgs.getFlags() == XATTR_FLAGS.XATTR_FLAGS_REPLACE.getNumber())
                 throw new UserException(POSIXErrno.POSIX_ERROR_ENODATA, "attribute does not exist");
             
-            sMan.setXAttr(file.getId(), rq.getDetails().userId, attrKey, attrVal.length == 0 ? null
+            // if the attribute should be visible to all users, use the special global user ID
+            String userId = attrKey.startsWith(StorageManager.GLOBAL_ATTR_KEY_PREFIX) ?
+                    StorageManager.GLOBAL_ID :
+                    rq.getDetails().userId;
+
+            sMan.setXAttr(file.getId(), userId, attrKey, attrVal.length == 0 ? null
                 : attrVal, update);
         }
         

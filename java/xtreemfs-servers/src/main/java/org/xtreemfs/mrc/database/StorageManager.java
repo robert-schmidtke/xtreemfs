@@ -44,6 +44,11 @@ public interface StorageManager {
      * key prefix for XtreemFS system attributes
      */
     public static final String SYS_ATTR_KEY_PREFIX = "xtreemfs.";
+
+    /**
+     * key prefix for global attributes
+     */
+    public static final String GLOBAL_ATTR_KEY_PREFIX = "global.";
     
     // file ID counter operations
     
